@@ -448,3 +448,424 @@ SELECT 5
 
 Time: 0.047s
 ```
+
+
+
+### Модуль 3: Глубокая очистка и параметры
+##1. Многопроходная очистка индекса: Создал большую таблицу с индексом.
+Временно уменьшил параметр maintenance_work_mem до очень маленького значения.
+Сгенерировал большое количество мертвых кортечей (много UPDATE/DELETE).
+Запустил VACUUM VERBOSE vacuum_test;. Проконтролировал в выводе, что очистка
+индекса потребовала нескольких проходов.
+```sql
+CREATE TABLE vacuum_test(id int, pad text);
+CREATE INDEX vacuum_test_idx ON vacuum_test(id);
+INSERT INTO vacuum_test
+SELECT g, repeat('z', 100) FROM generate_series(1,1000000) g;
+SET maintenance_work_mem = '1MB';
+UPDATE vacuum_test SET pad = repeat('z',120) WHERE id % 2 = 0;
+DELETE FROM vacuum_test WHERE id % 10 = 0;
+VACUUM VERBOSE vacuum_test; 
+```
+-- вывод
+```text
+CREATE TABLE
+
+CREATE INDEX
+
+INSERT 0 1000000
+
+SET
+
+UPDATE 500000
+
+DELETE 100000
+
+INFO:  vacuuming "lab04_db.public.vacuum_test"
+INFO:  finished vacuuming "lab04_db.public.vacuum_test": index scans: 4
+pages: 0 removed, 26857 remain, 26857 scanned (100.00% of total)
+tuples: 100000 removed, 900000 remain, 0 are dead but not yet removable
+removable cutoff: 1018, which was 0 XIDs old when operation ended
+new relfrozenxid: 1015, which is 2 XIDs ahead of previous value
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+index scan needed: 26857 pages from table (100.00% of total) had 600000 dead item identifiers removed
+index "vacuum_test_idx": pages: 5486 in total, 0 newly deleted, 0 currently deleted, 0 reusable
+avg read rate: 340.087 MB/s, avg write rate: 173.720 MB/s
+buffer usage: 62392 hits, 40152 misses, 20510 dirtied
+WAL usage: 74267 records, 3 full page images, 7120684 bytes
+system usage: CPU: user: 0.33 s, system: 0.30 s, elapsed: 0.92 s
+INFO:  vacuuming "lab04_db.pg_toast.pg_toast_32903"
+INFO:  finished vacuuming "lab04_db.pg_toast.pg_toast_32903": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total)
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: 1018, which was 0 XIDs old when operation ended
+new relfrozenxid: 1018, which is 5 XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: 24.094 MB/s, avg write rate: 6.024 MB/s
+buffer usage: 16 hits, 4 misses, 1 dirtied
+WAL usage: 1 records, 0 full page images, 188 bytes
+system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+VACUUM
+```
+```text
+CREATE TABLE
+
+ALTER SYSTEM
+
+ALTER SYSTEM
+
+ALTER TABLE
+
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+```
+##2. Обычная очистка после удаления: Удалил 90% случайных строк из большой таблицы.
+Выполнил обычную очистку (VACUUM). Проверил, изменился ли физический размер
+таблицы на диске.
+``` sql
+SELECT pg_size_pretty(pg_total_relation_size('large_vacuum_test')) as size_before_delete;
+
+DELETE FROM large_vacuum_test WHERE random() < 0.9;
+
+SELECT pg_size_pretty(pg_total_relation_size('large_vacuum_test')) as size_after_delete;
+
+VACUUM large_vacuum_test;
+
+SELECT pg_size_pretty(pg_total_relation_size('large_vacuum_test')) as size_after_vacuum;
+```
+```text
++--------------------+
+| size_before_delete |
+|--------------------|
+| 132 MB             |
++--------------------+
+SELECT 1
+
+DELETE 45014
+
++-------------------+
+| size_after_delete |
+|-------------------|
+| 132 MB            |
++-------------------+
+SELECT 1
+VACUUM
+
++-------------------+
+| size_after_vacuum |
+|-------------------|
+| 132 MB            |
++-------------------+
+SELECT 1
+Time: 0.616s
+```
+
+##3. Полная очистка после удаления: Повторил удаление 90% строк. Выполнил полную очистку (VACUUM FULL). Сравнил результат с предыдущим пунктом.
+```sql
+DROP TABLE vacuum_test;
+CREATE TABLE vacuum_test(id int, pad text);
+CREATE INDEX vacuum_test_idx ON vacuum_test(id);
+INSERT INTO vacuum_test
+SELECT g, repeat('z', 100) FROM generate_series(1,1000000) g;
+-- до удаления
+SELECT pg_table_size('vacuum_test');
+SELECT pg_total_relation_size('vacuum_test');
+DELETE FROM vacuum_test WHERE random() < 0.9;
+-- после удаления
+SELECT pg_table_size('vacuum_test');
+SELECT pg_total_relation_size('vacuum_test');
+VACUUM FULL vacuum_test;
+-- после очистки
+SELECT pg_table_size('vacuum_test');
+SELECT pg_total_relation_size('vacuum_test');             
+```
+
+--вывод 
+```text
+DROP TABLE
+CREATE TABLE
+CREATE INDEX
+INSERT 0 1000000
+-- до удаления
+ pg_table_size 
+---------------
+     141312000
+(1 row)
+
+ pg_total_relation_size 
+------------------------
+              163799040
+(1 row)
+
+DELETE 900226
+-- после удаления
+ pg_table_size 
+---------------
+     141312000
+(1 row)
+
+ pg_total_relation_size 
+------------------------
+              163799040
+(1 row)
+
+VACUUM
+-- после очистки
+ pg_table_size 
+---------------
+      14106624
+(1 row)
+
+ pg_total_relation_size 
+------------------------
+               16359424
+(1 row)
+```
+
+### Модуль 4: Автоочистка и заморозка
+
+##1. Настройка автоочистки. Я настроил автоочистку для тестовой таблицы: установил порог в 10% изменённых строк через autovacuum_vacuum_scale_factor = 0.1 и уменьшил интервал запуска до 1 секунды (autovacuum_naptime = 1s).
+```sql
+CREATE TABLE av_test(id int, payload text);
+ALTER SYSTEM SET autovacuum_naptime = '1s';
+ALTER SYSTEM SET log_autovacuum_min_duration = '0';
+ALTER TABLE av_test SET (autovacuum_vacuum_scale_factor = 0.1);
+SELECT pg_reload_conf();
+```
+
+##2. Нагрузочный тест. Я создал таблицу примерно на 100 000 строк и в цикле выполнял серию транзакций, каждую из которых изменяла около 5–6 % случайных строк. Параллельно я отслеживал срабатывания автоочистки через логи и после завершения цикла проанализировал итоговый размер таблицы, сопоставив его с выбранными параметрами автоочистки.
+```sql
+INSERT INTO av_test
+SELECT g, repeat('a',50) FROM generate_series(1,100000) g;
+ANALYZE av_test;
+SELECT pg_table_size('av_test'); 
+SELECT pg_total_relation_size('av_test');
+```
+```bash
+for i in {1..20}; do
+  psql -d lab04_db -c "UPDATE av_test SET payload = repeat('b',50)||id WHERE random() < 0.06";
+  sleep 2
+done
+```
+```sql
+SELECT relname, n_dead_tup, autovacuum_count, vacuum_count, analyze_count
+FROM pg_stat_user_tables
+WHERE relname = 'av_test';
+SELECT pg_table_size('av_test'); 
+SELECT pg_total_relation_size('av_test');
+```
+--фрагмент выводов
+```text
+```sql
+CREATE TABLE av_test(id int, payload text);
+ALTER SYSTEM SET autovacuum_naptime = '1s';
+ALTER SYSTEM SET log_autovacuum_min_duration = '0';
+ALTER TABLE av_test SET (autovacuum_vacuum_scale_factor = 0.1);
+SELECT pg_reload_conf();
+```
+```text
+INSERT 0 100000
+ANALYZE
+ pg_table_size 
+---------------
+       8478720
+(1 row)
+
+ pg_total_relation_size 
+------------------------
+                8478720
+(1 row)
+```
+```text
+UPDATE 6027
+UPDATE 5967
+UPDATE 5937
+UPDATE 5948
+UPDATE 5926
+UPDATE 6092
+UPDATE 6052
+UPDATE 5983
+UPDATE 5974
+UPDATE 5944
+UPDATE 6017
+UPDATE 5938
+UPDATE 5984
+UPDATE 5749
+UPDATE 5992
+UPDATE 6145
+UPDATE 6002
+UPDATE 5987
+UPDATE 5933
+UPDATE 6029
+```
+```text
+ relname | n_dead_tup | autovacuum_count | vacuum_count | analyze_count 
+---------+------------+------------------+--------------+---------------
+ av_test |       6482 |                5 |            0 |             1
+(1 row)
+
+ pg_table_size 
+---------------
+      10067968
+(1 row)
+
+ pg_total_relation_size 
+------------------------
+               10067968
+(1 row)
+```
+##3. Заморозка версий. С помощью pageinspect я проверил, что COPY … WITH FREEZE загружает строки уже в замороженном состоянии — их xmin имеет специальное значение. Я также убедился, что такие строки остаются видимыми даже в транзакции уровня Repeatable Read, начатой перед загрузкой данных.
+```sql
+-- Сеанс 1
+CREATE TABLE frz_test(id int, note text);
+```
+```sql
+-- Сеанс 2
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+```
+```sql
+-- Сеанс 1
+BEGIN;
+TRUNCATE frz_test;
+COPY frz_test (id, note)
+FROM STDIN WITH FREEZE;
+1 a
+2 b
+3 c
+\.
+COMMIT;
+```
+```sql
+-- Сеанс 1
+BEGIN;
+TRUNCATE frz_test;
+COPY frz_test (id, note)
+FROM STDIN WITH FREEZE;
+1 a
+2 b
+3 c
+\.
+COMMIT;
+SELECT id, xmin, age(xmin) AS age
+FROM frz_test ORDER BY id;
+```
+```sql
+-- Сеанс 2
+SELECT count(*) FROM frz_test;
+SELECT id, xmin, age(xmin) AS age
+FROM frz_test ORDER BY id;
+COMMIT;
+```
+--фрагмент выводов
+```text
+-- Сеанс 1
+CREATE TABLE
+```
+```text
+-- Сеанс 2
+BEGIN
+```
+```text
+-- Сеанс 1
+BEGIN
+
+TRUNCATE TABLE
+
+COPY 3
+
+COMMIT;
+
+ id | xmin | age 
+----+------+-----
+  1 | 1194 |   1
+  2 | 1194 |   1
+  3 | 1194 |   1
+(3 rows)
+
+```
+```text
+-- Сеанс 1
+ id | note 
+----+------
+  1 | a
+  2 | b
+  3 | c
+(3 rows)
+
+ id | xmin | age 
+----+------+-----
+  1 | 1194 |  -1
+  2 | 1194 |  -1
+  3 | 1194 |  -1
+(3 rows)
+```
+
+##4. Принудительная очистка и заморозка. Я уменьшил параметр autovacuum_freeze_max_age до минимального, отключил автоочистку для таблицы и выполнил большое число транзакций, чтобы превысить порог возраста. После ручного VACUUM была выполнена агрессивная очистка с заморозкой, что подтвердилось записями в логах.
+``` sql
+DROP TABLE frz_test;
+CREATE TABLE frz_test(id int, note text);
+ALTER SYSTEM SET autovacuum_freeze_max_age = '100000';
+SELECT pg_reload_conf();
+ALTER TABLE frz_test SET (autovacuum_enabled = off);
+
+SELECT 'SELECT txid_current();' FROM generate_series(1,150000);
+\gexec
+
+
+VACUUM (VERBOSE, FREEZE) frz_test;
+SELECT relname, age(relfrozenxid)
+FROM pg_class
+WHERE relname = 'frz_test';
+```
+-- вывод фрагмента
+```text
+DROP TABLE
+
+CREATE TABLE
+
+ALTER SYSTEM
+
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+ALTER TABLE
+```
+
+```text
+INFO:  aggressively vacuuming "lab04_db.public.frz_test"
+INFO:  finished vacuuming "lab04_db.public.frz_test": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total)
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: 366281, which was 0 XIDs old when operation ended
+new relfrozenxid: 366281, which is 150002 XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: 0.000 MB/s, avg write rate: 15.976 MB/s
+buffer usage: 4 hits, 0 misses, 1 dirtied
+WAL usage: 1 records, 1 full page images, 5097 bytes
+system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+INFO:  aggressively vacuuming "lab04_db.pg_toast.pg_toast_33038"
+INFO:  finished vacuuming "lab04_db.pg_toast.pg_toast_33038": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total)
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: 366281, which was 0 XIDs old when operation ended
+new relfrozenxid: 366281, which is 150002 XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: 37.380 MB/s, avg write rate: 74.761 MB/s
+buffer usage: 19 hits, 1 misses, 2 dirtied
+WAL usage: 3 records, 2 full page images, 3190 bytes
+system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+VACUUM
+
+ relname  | age 
+----------+-----
+ frz_test |   0
+(1 row)
+```
+

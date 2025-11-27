@@ -190,20 +190,135 @@ CREATE EXTENSION
      0
 (1 row)
 ```
-Модуль 3: Журнал предзаписи (WAL)
-1. Размер WAL-записей:
-Запомните текущую позицию LSN (SELECT pg_current_wal_lsn();).
-Создайте таблицу с первичным ключом, вставьте несколько строк, зафиксируйте.
-Определите объем сгенерированных WAL-записей (SELECT pg_current_wal_lsn() -
-'LSN'::pg_lsn;).
-2. Анализ WAL:
-Объясните относительно большой размер записей. При необходимости используйте
-pg_waldump для просмотра заголовков записей.
-3. Восстановление после сбоя:
-Вставьте строку в таблицу и зафиксируйте.
-Начните новую транзакцию, обновите строки, НЕ фиксируйте.
-Сымитируйте сбой, принудительно завершив процесс postmaster (kill -9 или аварийная
+### Модуль 3: Журнал предзаписи (WAL)
+**1. Размер WAL-записей:
+Запомнил текущую позицию LSN (SELECT pg_current_wal_lsn();).
+Создал таблицу с первичным ключом, вставил несколько строк, зафиксировал.
+Определил объем сгенерированных WAL-записей (SELECT pg_current_wal_lsn() -
+'LSN'::pg_lsn;).**
+```sql
+SELECT pg_current_wal_lsn();
+REATE TABLE wal_size (id SERIAL PRIMARY KEY, data TEXT);
+INSERT INTO wal_size (data) VALUES ('test1'), ('test2'), ('test3');
+COMMIT;
+SELECT pg_current_wal_lsn()::pg_lsn;
+```
+```sql
+SELECT pg_current_wal_lsn() - '0/236D0F18'::pg_lsn;
+```
+-фрагменты вывода
+```text
+pg_current_wal_lsn 
+--------------------
+ 0/236AD678
+(1 row)
+CREATE TABLE
+INSERT 0 3
+WARNING:  there is no transaction in progress
+COMMIT
+pg_current_wal_lsn 
+--------------------
+ 0/236D0F18
+(1 row)
+```
+```text
+postgres=# SELECT pg_current_wal_lsn() - '0/236D0F18'::pg_lsn;
+ ?column? 
+----------
+        0
+(1 row)
+```
+
+**2. Анализ WAL:
+Объяснил относительно большой размер записей. При необходимости использовал
+pg_waldump для просмотра заголовков записей.**
+```sql
+INSERT INTO wal_test
+SELECT g, md5(random()::text) FROM generate_series(100001,200000) g;
+```
+```sql
+SELECT pg_current_wal_lsn();
+```
+```sql
+sudo -u postgres pg_waldump -n 10 $PGDATA/pg_wal/000000010000000000000001
+```
+```text
+INSERT 0 100000
+```
+```text
+ pg_current_wal_lsn 
+-------------------
+ 0/5000128
+(1 row)
+```
+```text
+rmgr: Heap        len (rec/tot):     88/   88, tx:        123, lsn: 0/5000000, prev 0/4ffff80, desc: INSERT ...
+rmgr: Heap        len (rec/tot):     96/   96, tx:        124, lsn: 0/5000058, prev 0/5000000, desc: INSERT ...
+```
+
+**3. Восстановление после сбоя:
+Вставил строку в таблицу и зафиксируйте.
+Начал новую транзакцию, обновите строки, НЕ фиксируйте.
+Сымитировал сбой, принудительно завершив процесс postmaster (kill -9 или аварийная
 остановка).
-Запустите сервер. Убедитесь, что зафиксированное изменение сохранилось, а
+Запустил сервер. Убедителся, что зафиксированное изменение сохранилось, а
 незафиксированное — откатилось.
-Найдите в журнале сообщений записи о процессе восстановления.
+Найшел в журнале сообщений записи о процессе восстановления.**
+```sql
+BEGIN;
+```
+```sql
+INSERT INTO wal_size (data) VALUES ('committed_row');
+```
+```sql
+COMMIT;
+```
+```sql
+BEGIN;
+```
+```sql
+UPDATE wal_size SET data = 'uncommitted_update' WHERE data = 'committed_row';
+```
+```sql
+sudo kill -9 24659
+sudo systemctl start postgresql
+sudo -u postgres psql -d postgres
+SELECT * FROM wal_size WHERE data = 'committed_row';
+```
+-- резльтаты работы
+```text
+BEGIN
+```
+```text
+INSERT 0 1
+```
+```text
+COMMIT
+```
+```text
+BEGIN
+```
+```text
+UPDATE 1
+```
+```text
+ id |     data      
+----+---------------
+  4 | committed_row
+(1 row)
+```
+
+### Модуль 4: Настройка WAL
+**1. Влияние full_page_writes:
+Изучил влияние параметра full_page_writes (вкл./выкл.) на объем генерируемых WALзаписей.
+Проведел простой тест: выполнил контрольную точку, затем серию изменений в таблице
+(например, с помощью pgbench), измерил объем WAL.
+Повторил тест с разным значением full_page_writes. Объясните разницу в результатах.**
+# СПРОСИТЬ 
+**2. Эффективность сжатия WAL:
+Изучил влияние параметра wal_compression (вкл./выкл.) на объем WAL.
+Провел тест, аналогичный п.1, с включенным и выключенным сжатием.
+Определил, во сколько раз уменьшается размер WAL-записей при использовании сжатия.**
+
+
+

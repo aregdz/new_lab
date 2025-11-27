@@ -14,16 +14,72 @@ MVCC (Multiversion Concurrency Control) позволяет нескольким 
 
 ### Модуль 1: Уровни изоляции и аномалии
 ## 1. Read Committed vs Удаление:
-Создайте таблицу iso_test (id INT, data TEXT) и вставьте одну строку.
-В сеансе 1 начните транзакцию с уровнем READ COMMITTED и выполните SELECT * FROM
+Создал таблицу iso_test (id INT, data TEXT) и вставил одну строку.
+В сеансе 1 начал транзакцию с уровнем READ COMMITTED и выполнил SELECT * FROM
 iso_test;.
-В сеансе 2 удалите строку и зафиксируйте изменения (DELETE ...; COMMIT;).
-В сеансе 1 выполните тот же SELECT повторно. Сколько строк увидите? Завершите
-транзакцию в сеансе 1.
+В сеансе 2 удалил строку и зафиксировал изменения (DELETE ...; COMMIT;).
+В сеансе 1 выполнил тот же SELECT повторно. 
+```sql
+-- Сеанс 1
+CREATE DATABASE lab03_db;
+\c lab03_db
+CREATE TABLE iso_test(id INT, data TEXT);
+INSERT INTO iso_test VALUES (1,'row1');
+
+BEGIN ISOLATION LEVEL READ COMMITTED;
+SELECT * FROM iso_test;
+```
+```sql
+-- Сеанс 2
+\c lab03_db
+DELETE FROM iso_test WHERE id=1;
+COMMIT;
+```
+```sql
+-- Сеанс 1
+SELECT * FROM iso_test;
+COMMIT;
+```
+Фрагмент вывода: 
+```text
+CREATE DATABASE
+You are now connected to database "lab03_db" as user "student".
+
+CREATE TABLE
+
+INSERT 0 1
+
+BEGIN
+
+ id | data 
+----+------
+  1 | row1
+(1 row)
+```
+```text
+You are now connected to database "lab03_db" as user "student".
+
+DELETE 1
+
+WARNING:  there is no transaction in progress
+COMMIT
+
+```
+```text
+ id | data 
+----+------
+  1 | row1
+(1 row)
+
+COMMIT
+```
+**Вывод:**  cоздалась таблица, добавили данные и начали транзакцию. Пока видим одну строку. Псоле удаление всех данные из таблицы и подтверждение изменений. После а уровне `READ COMMITTED` мы увидим, что строки исчезли, потому что эта транзакция видит изменения, подтвержденные другими.
+
+
 ## 2. Repeatable Read vs Удаление:
-Повторите предыдущий эксперимент, но в сеансе 1 начните транзакцию с BEGIN
+Повторил предыдущий эксперимент, но в сеансе 1 начал транзакцию с BEGIN
 ISOLATION LEVEL REPEATABLE READ;.
-Объясните разницу в результатах между двумя уровнями изоляции.
+Объяснил разницу в результатах между двумя уровнями изоляции.
 ## 3. Создание таблицы в транзакции:
 В сеансе 1 начните транзакцию и создайте новую таблицу new_table, вставьте в нее строку.
 Не фиксируйте.

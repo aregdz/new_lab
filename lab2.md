@@ -147,20 +147,280 @@ temp_buffers так, чтобы в каждом новом сеансе, под�
 ## Модуль 2: Системный каталог
 **1. Исследование pg_class: Получил описание системной таблицы pg_class (команда \d
 pg_class).
+```sql
+\d pg_class
+```
+фрагмент вывода
+```text
+                    Table "pg_catalog.pg_class"
+       Column        |     Type     | Collation | Nullable | Default 
+---------------------+--------------+-----------+----------+---------
+ oid                 | oid          |           | not null | 
+ relname             | name         |           | not null | 
+ relnamespace        | oid          |           | not null | 
+ reltype             | oid          |           | not null | 
+ reloftype           | oid          |           | not null | 
+ relowner            | oid          |           | not null | 
+ relam               | oid          |           | not null | 
+ relfilenode         | oid          |           | not null | 
+ reltablespace       | oid          |           | not null | 
+ relpages            | integer      |           | not null | 
+ reltuples           | real         |           | not null | 
+ relallvisible       | integer      |           | not null | 
+ reltoastrelid       | oid          |           | not null | 
+ relhasindex         | boolean      |           | not null | 
+ relisshared         | boolean      |           | not null | 
+ relpersistence      | "char"       |           | not null | 
+ relkind             | "char"       |           | not null | 
+ relnatts            | smallint     |           | not null | 
+ relchecks           | smallint     |           | not null | 
+ relhasrules         | boolean      |           | not null | 
+ relhastriggers      | boolean      |           | not null | 
+ relhassubclass      | boolean      |           | not null | 
+ relrowsecurity      | boolean      |           | not null | 
+ relforcerowsecurity | boolean      |           | not null | 
+ relispopulated      | boolean      |           | not null | 
+ relreplident        | "char"       |           | not null | 
+ relispartition      | boolean      |           | not null | 
+ relrewrite          | oid          |           | not null | 
+ relfrozenxid        | xid          |           | not null | 
+ relminmxid          | xid          |           | not null | 
+ relacl              | aclitem[]    |           |          | 
+ reloptions          | text[]       | C         |          | 
+ relpartbound        | pg_node_tree | C         |          | 
+Indexes:
+    "pg_class_oid_index" PRIMARY KEY, btree (oid)
+    "pg_class_relname_nsp_index" UNIQUE CONSTRAINT, btree (relname, relnamespace)
+    "pg_class_tblspc_relfilenode_index" btree (reltablespace, relfilenode)
 
+
+```
 **2. Исследование pg_tables: Получил подробное описание представления pg_tables (команда
 \d+ pg_tables). Объяснил разницу между таблицей и представлением.
+```sql
+\d+ pg_tables
+```
+фрагмент вывода
+```text
+mydb=# \d+ pg_tables
+                          View "pg_catalog.pg_tables"
+   Column    |  Type   | Collation | Nullable | Default | Storage | Description 
+-------------+---------+-----------+----------+---------+---------+-------------
+ schemaname  | name    |           |          |         | plain   | 
+ tablename   | name    |           |          |         | plain   | 
+ tableowner  | name    |           |          |         | plain   | 
+ tablespace  | name    |           |          |         | plain   | 
+ hasindexes  | boolean |           |          |         | plain   | 
+ hasrules    | boolean |           |          |         | plain   | 
+ hastriggers | boolean |           |          |         | plain   | 
+ rowsecurity | boolean |           |          |         | plain   | 
+View definition:
+ SELECT n.nspname AS schemaname,
+    c.relname AS tablename,
+    pg_get_userbyid(c.relowner) AS tableowner,
+    t.spcname AS tablespace,
+    c.relhasindex AS hasindexes,
+    c.relhasrules AS hasrules,
+    c.relhastriggers AS hastriggers,
+    c.relrowsecurity AS rowsecurity
+   FROM pg_class c
+     LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+     LEFT JOIN pg_tablespace t ON t.oid = c.reltablespace
+  WHERE c.relkind = ANY (ARRAY['r'::"char", 'p'::"char"]);
+```
+```text
+Признак	Таблица (table)	Представление (view)
+Хранение данных	Физически хранит строки на диске	Не хранит данных (если не материализованное)
+Обновление	Можно вставлять, обновлять, удалять данные	Обычно нельзя изменять напрямую (без INSTEAD OF триггеров)
+Основана на	Данных самой таблицы	На SQL-запросе, который выбирает данные из одной или нескольких таблиц
+Пример	students	active_students (выборка студентов с флагом active)
+```
 
 **3. Временная таблица и список схем: В базе lab02_db создайте временную таблицу. Получил
 полный список всех схем в этой БД, включая системные (pg_catalog, information_schema).
 Объяснил наличие временной схемы.
+```sql
+CREATE TEMPORARY TABLE temp_students (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(50),
+    grade INT
+);
+```
+Фрагмент вывода
+```text
+CREATE TABLE
+```
+-- Получение полного списка схем
+```sql
+SELECT nspname AS schema_name
+FROM pg_namespace
+ORDER BY nspname;
+```
+```text
+  schema_name     
+--------------------
+ information_schema
+ pg_catalog
+ pg_temp_3
+ pg_toast
+ pg_toast_temp_3
+ public
+(6 rows)
+```
+```text
+Наличие временной схемы
+Каждая сессия, где создаются временные таблицы, получает свою временную схему (pg_temp_nnn).
+Она нужна для изоляции данных между сессиями.
+Таблицы в этой схеме автоматически удаляются при завершении сессии.
+```
 
 **4. Представления information_schema: Получил список всех представлений в схеме
 information_schema.
-
+```sql
+SELECT table_name
+FROM information_schema.views
+WHERE table_schema = 'information_schema'
+ORDER BY table_name;
+```
+Фрагмент вывода
+```text
+              table_name               
+---------------------------------------
+ _pg_foreign_data_wrappers
+ _pg_foreign_servers
+ _pg_foreign_table_columns
+ _pg_foreign_tables
+ _pg_user_mappings
+ administrable_role_authorizations
+ applicable_roles
+ attributes
+ character_sets
+ check_constraint_routine_usage
+ check_constraints
+ collation_character_set_applicability
+ collations
+ column_column_usage
+ column_domain_usage
+ column_options
+ column_privileges
+ column_udt_usage
+ columns
+ constraint_column_usage
+ constraint_table_usage
+ data_type_privileges
+ domain_constraints
+ domain_udt_usage
+ domains
+ element_types
+ enabled_roles
+ foreign_data_wrapper_options
+ foreign_data_wrappers
+ foreign_server_options
+ foreign_servers
+ foreign_table_options
+ foreign_tables
+ information_schema_catalog_name
+ key_column_usage
+ parameters
+ referential_constraints
+ role_column_grants
+ role_routine_grants
+ role_table_grants
+ role_udt_grants
+:
+```
 **5. Анализ метакоманды: Выполнил в psql команду \d+ pg_views. Изучил вывод и объясните,
 какие запросы к системному каталогу скрыты за этой командой.
+```sql
+ \d+ pg_views
+```
+Фрагмент вывода: 
+```text
+                         View "pg_catalog.pg_views"
+   Column   | Type | Collation | Nullable | Default | Storage  | Description 
+------------+------+-----------+----------+---------+----------+-------------
+ schemaname | name |           |          |         | plain    | 
+ viewname   | name |           |          |         | plain    | 
+ viewowner  | name |           |          |         | plain    | 
+ definition | text |           |          |         | extended | 
+View definition:
+ SELECT n.nspname AS schemaname,
+    c.relname AS viewname,
+    pg_get_userbyid(c.relowner) AS viewowner,
+    pg_get_viewdef(c.oid) AS definition
+   FROM pg_class c
+     LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind = 'v'::"char";
+```
+```text
+pg_class — хранит все объекты базы (таблицы, индексы, представления).
+pg_namespace — хранит схемы (чтобы узнать, в какой схеме view).
+pg_roles — хранит информацию о владельцах объектов.
+pg_get_viewdef(c.oid) — функция, которая возвращает SQL-запрос для представления по его OID.
+c.relkind = 'v' — фильтр, чтобы выбрать только представления.
+То есть \d+ pg_views — это удобная оболочка, которая показывает пользователю результат объединённых системных таблиц и функций, скрывая сложный SQL.
+```
+## Модуль 3: Табличные пространства
+**1. Создание Tablespace: Создал каталог в файловой системе (напр.,
+/home/student/mytablespace). Создал новое табличное пространство lab02_ts, указывающее
+на этот каталог.
+```sql
+sudo -i -u postgres
+mkdir -p ~/mytablespace
+chmod 700 ~/mytablespace
+psql -U postgres
+CREATE TABLESPACE lab02_ts LOCATION '/var/lib/postgresql/mytablespace';
+SELECT spcname, pg_tablespace_location(oid) AS location
+FROM pg_tablespace
+WHERE spcname = 'lab02_ts';
+```
+Фрагмент вывода: 
+```text
+ spcname  |             location             
+----------+----------------------------------
+ lab02_ts | /var/lib/postgresql/mytablespace
+(1 row)
 
-   
+```
+**2. Tablespace по умолчанию: Изменил табличное пространство по умолчанию для базы данных
+template1 на lab02_ts. Объяснил цель этого действия.
+```sql
+ALTER DATABASE template1 SET TABLESPACE lab02_ts;
+```
+фрагмент вывода
+```txt
+ALTER DATABASE
+```
+--Изменение tablespace по умолчанию позволяет контролировать где будут храниться данные базы и её будущих копий, улучшая управление пространством и производительностью.
+
+**3. Наследование свойства: Создал новую базу данных lab02_db_new. Проверил ее табличное
+пространство по умолчанию. Объяснил результат.
+```sql
+CREATE DATABASE lab02_db_new;
+\l+ lab02_db_new
+```
+Фрагмент вывода
+```text
+
+                                                                         List of databases
+     Name     |  Owner   | Encoding | Locale Provider |   Collate   |    Ctype    | ICU Locale | ICU Rules | Access privileges |  Size   | Tablespace | Description 
+--------------+----------+----------+-----------------+-------------+-------------+------------+-----------+-------------------+---------+------------+-------------
+ lab02_db_new | postgres | UTF8     | libc            | en_US.UTF-8 | en_US.UTF-8 |            |           |                   | 7425 kB | lab02_ts   | 
+(1 row)
+
+(END)
+
+```
+-- Новая база данных наследует свойства табличного пространства от шаблона template1, и если вы не указали другое, используется стандартное pg_default.
+
+**4. Символическая ссылка: Нашел в каталоге PGDATA/pg_tblspc/ символьную ссылку,
+соответствующую lab02_ts. Куда она ведет?
+
+**5. Удаление Tablespace: Удалил табличное пространство lab02_ts с опцией CASCADE. Объяснил
+необходимость использования CASCADE.
+
+**6. Практика+ (Параметр Tablespace): Установил параметр random_page_cost в значение 1.1 для
+табличного пространства pg_default.
+
    
 

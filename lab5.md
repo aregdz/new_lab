@@ -87,12 +87,100 @@ gresql/.s.PGSQL.5432"
 **1. Анализ размера: Создал таблицу wal_test (id INT, data TEXT). Вставил в нее достаточное количество
 строк.Определил, сколько страниц на диске занимает таблица (например, с помощью
 pg_relation_size(...) / current_setting('block_size')::int).Определил, сколько буферов занимает таблица в кеше (запрос к pg_buffercache).**
-
+```sql
+sudo -u postgres psql -d postgres
+CREATE TABLE wal_test (id INT, data TEXT);
+```
+```sql
+INSERT INTO wal_test
+SELECT g, md5(random()::text) FROM generate_series(1,100000) g;
+SELECT pg_relation_size('wal_test') / current_setting('block_size')::int AS pages_on_disk;
+CREATE EXTENSION pg_buffercache;
+SELECT count(*)
+FROM pg_buffercache
+WHERE relfilenode = pg_relation_filenode('wal_test'::regclass);
+```
+```text
+CREATE TABLE
+INSERT 0 100000
+ pages_on_disk 
+---------------
+           834
+(1 row)
+```
+```text
+CREATE EXTENSION
+ count 
+-------
+   838
+(1 row)
+```
 
 
 **2. Грязные буферы и контрольная точка: Узнал общее количество "грязных" буферов в кеше (запрос к pg_stat_bgwriter или
 pg_buffercache). Выполнил команду CHECKPOINT;. Снова проверил количество "грязных" буферов. Объяснил результат.**
-
+```sql
+SELECT count(*) FROM pg_buffercache WHERE isdirty;
+```
+```text
+ count 
+-------
+   263
+(1 row)
+```
+```sql
+CHECKPOINT;
+```
+```text
+CHECKPOINT
+```
+```sql
+SELECT count(*) FROM pg_buffercache WHERE isdirty;
+```
+```text
+ count 
+-------
+     0
+(1 row)
+```
 
 
 **3. Предварительное чтение (pg_prewarm): Подключил расширение pg_prewarm. Загрузил свою таблицу в кеш с помощью pg_prewarm(...). Перезапустил сервер. Проверил, осталась ли таблица в кеше. Проанализировал эффективность метода.**
+```sql
+CREATE EXTENSION pg_prewarm;
+```
+```sql
+SELECT pg_prewarm('wal_test');
+```
+```sql
+SELECT count(*)
+FROM pg_buffercache
+WHERE relfilenode = pg_relation_filenode('wal_test'::regclass);
+```
+```sql
+SELECT count(*)
+FROM pg_buffercache
+WHERE relfilenode = pg_relation_filenode('wal_test'::regclass);
+```
+-вывод 
+```text
+CREATE EXTENSION
+```
+```text
+ pg_prewarm 
+------------
+ t
+(1 row)
+```
+```text
+ count 
+-------
+   834
+(1 row)
+```
+```text
+ count 
+-------
+     0
+(1 row)
+```

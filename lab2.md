@@ -116,7 +116,36 @@ ab02_db=# SELECT * FROM users;
 (1 row)
 ```
 
-6. Практика+ (Настройка параметра БД): Для базы lab02_db установите значение параметра
+5. Практика+ (Настройка параметра БД): Для базы lab02_db установите значение параметра
 temp_buffers так, чтобы в каждом новом сеансе, подключенном к этой БД, оно было в 4 раза
 больше значения по умолчанию. Проверьте работу.
+-- Узнал значение по умолчанию для temp_buffers
+   ```sql
+   sudo -u postgres psql -d lab02_db
+   SHOW temp_buffers;
+   ```
+   ```text
+   lab02_db=# SHOW temp_buffers;
+     temp_buffers 
+    --------------
+     8MB
+    (1 row)
+   ```
+   -- Установил параметр для базы так, чтобы он был в 4 раза больше и проверил работу
+   ```sql
+   ALTER DATABASE lab02_db SET temp_buffers = '32MB';
+   \c lab02_db
+    SHOW temp_buffers;
+    ```
+   ```text
+   lab02_db=# SHOW temp_buffers;
+     temp_buffers 
+    --------------
+     32MB
+    (1 row)
+    ```
+
+
+   
+   
 

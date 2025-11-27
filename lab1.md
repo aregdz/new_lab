@@ -381,3 +381,22 @@ postgres=# SHOW work_mem;
 ```
 -- Вывод: Как только транзакция завершается (COMMIT или ROLLBACK), параметр автоматически возвращается к предыдущему значению.
 
+**ЗАДАЧА 3:**
+--Устанавливаем пользовательский параметр
+```sql
+sudo -u postgres psql
+```
+```text
+SET
+```
+-- Считываем значение с помощью current_setting
+```sql
+SELECT current_setting('app.my_setting');
+```
+```text
+ current_setting 
+-----------------
+ test_value
+(1 row)
+```
+

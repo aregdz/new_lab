@@ -271,3 +271,72 @@ postgres=# SHOW log_min_duration_statement;
  500ms
 (1 row)
 ```
+
+###часть 3: Управление параметрами на уровне сеанса
+1. Команда SET: В рамках сеанса изменил значение параметра work_mem с помощью SET.
+Проверил новое значение. Завершил транзакцию с помощью ROLLBACK и проверил значение
+параметра again. Объясните результат.
+2. Команда SET LOCAL: Открыл транзакцию (BEGIN). Inside the transaction, use SET LOCAL to
+change the work_mem parameter. Verify the change. After committing the transaction (COMMIT), check
+the parameter value again. Explain the result.
+3. Пользовательский параметр: Создал и установил значение для пользовательского
+параметра (имя должно содержать точку, например, app.my_setting). Прочитал его значение
+с помощью current_setting.
+
+**ЗАДАЧА 1:**
+**КОМАНДЫ И РЕЗУЬТАТЫ**
+```sql
+SHOW work_mem;
+```
+Проверил текущее значение work_mem
+```text
+ work_mem 
+----------
+ 16MB
+(1 row)
+```
+Изменил значение для текущего сеанса с помощью SET
+```sql
+SET work_mem = '64MB';
+```
+```text
+SET
+```
+Проверил, что новое значение применилось
+```sql
+SHOW work_mem;
+```
+```text
+ work_mem 
+----------
+ 64MB
+(1 row)
+```
+Проверка в транзакции
+```sql
+BEGIN;
+SET work_mem = '128MB';
+SHOW work_mem;
+```
+```text
+ work_mem 
+----------
+ 128MB
+(1 row)
+```
+```sql
+ROLLBACK;
+SHOW work_mem;
+```
+```text
+ work_mem 
+----------
+ 64MB
+(1 row)
+```
+**Выввод:**
+SET изменяет параметр только для текущего сеанса, а если используется внутри транзакции, изменение действует до конца транзакции.
+После ROLLBACK все изменения, сделанные в транзакции, отменяются, поэтому work_mem возвращается к значению, которое было установлено до транзакции (64MB в нашем примере).
+Это не влияет на глобальные настройки в postgresql.conf.
+
+

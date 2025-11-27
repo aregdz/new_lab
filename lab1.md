@@ -30,7 +30,7 @@
 **КОМАНДЫ**
 **Задача 1:**
 ```sql
-sudйo -u postgres psql
+sudo -u postgres psql
 SHOW config_file;
 ```
 **Задача 2:**

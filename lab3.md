@@ -508,3 +508,305 @@ COMMIT
 (2 rows)
 ```
 
+### Модуль 4: Снимки данных (Snapshots)
+1. Видимость удаленной строки: Воспроизвел ситуацию, при которой одна транзакция (A) видит строку, а другая (B),
+начавшаяся позже, — уже нет (строка удалена и зафиксирована после начала A, но до начала B). Использовал функции pg_current_snapshot() и pg_snapshot_xip(pg_current_snapshot()) для анализа снимков обеих транзакций. Изучил значения xmin и xmax удаленной строки. Объяснил разницу в видимости на основе анализа снимков.
+```sql
+-- Сеанс 1
+CREATE TABLE snap_test(id int primary key, note text);
+INSERT INTO snap_test VALUES (1,'stay or go');
+BEGIN;   
+```
+```sql
+-- Транзакция A (Сеанс 2)
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT * FROM snap_test;     
+```
+```sql
+-- Сеанс 1
+DELETE FROM snap_test; 
+COMMIT; 
+```
+```sql
+-- Транзакция B (Сеанс 3)
+BEGIN;
+SELECT * FROM snap_test; 
+```
+```sql
+-- Транзакция A (Сеанс 2)
+SELECT * FROM snap_test;   
+```
+
+```sql
+-- Сеанс 2
+SELECT * FROM pg_current_snapshot();
+SELECT pg_snapshot_xip(pg_current_snapshot());
+SELECT t_xmin, t_xmax, t_ctid  FROM heap_page_items(get_raw_page('snap_test',0)); 
+```
+```sql
+-- Сеанс 3
+SELECT * FROM pg_current_snapshot();
+SELECT pg_snapshot_xip(pg_current_snapshot());
+SELECT t_xmin, t_xmax, t_ctid  FROM heap_page_items(get_raw_page('snap_test',0)); 
+```
+```text
+-- Сеанс 1
+CREATE TABLE
+
+INSERT 0 1
+
+BEGIN
+```
+```text
+-- Транзакция A (Сеанс 2)
+BEGIN
+
+ id |    note    
+----+------------
+  1 | stay or go
+(1 row)
+```
+```text
+-- Сеанс 1
+DELETE 1
+
+COMMIT
+```
+```text
+-- Транзакция B (Сеанс 3)
+BEGIN
+ id | note 
+----+------
+(0 rows)
+
+```
+```text
+-- Транзакция A (Сеанс 2)
+ id |    note    
+----+------------
+  1 | stay or go
+(1 row)
+```
+```text
+-- Транзакция B (Сеанс 3)
+ pg_current_snapshot 
+---------------------
+ 881:881:
+(1 row)
+
+ pg_snapshot_xip 
+-----------------
+(0 rows)
+
+ t_xmin | t_xmax | t_ctid 
+--------+--------+--------
+    878 |    880 | (0,1)
+(1 row)
+```
+```text
+-- Транзакция A (Сеанс 2)
+ pg_current_snapshot 
+---------------------
+ 879:879:
+(1 row)
+
+ pg_snapshot_xip 
+-----------------
+(0 rows)
+
+
+ t_xmin | t_xmax | t_ctid 
+--------+--------+--------
+    878 |    880 | (0,1)
+(1 row)
+```
+**Вывод:** Видимость строк определяется снимком транзакции на момент её начала. Транзакция A начала до удаления и видит старую версию строки, так как t_xmin меньше её ID, а t_xmax ещё не виден. Транзакция B начала после удаления и видит строку как удалённую. Поля t_xmin и t_xmax отражают создание и удаление строки.
+
+
+**2. Снимки в функциях:** Создал функцию STABLE, возвращающую данные из таблицы. Исследовал, какой снимок данных используется для запроса внутри этой функции при разных уровнях изоляции (Read Committed и Repeatable Read). Повторил для функции
+VOLATILE. Объяснил разницу в поведении.
+```sql
+-- Сеанс 1
+CREATE OR REPLACE FUNCTION f_stable()
+RETURNS int LANGUAGE sql STABLE AS $$
+  SELECT count(*)::int FROM snap_test
+$$;
+
+CREATE OR REPLACE FUNCTION f_volatile()
+RETURNS int LANGUAGE sql VOLATILE AS $$
+  SELECT count(*)::int FROM snap_test
+$$;
+
+CREATE OR REPLACE FUNCTION f_stable_info()
+RETURNS TABLE(cnt int, snap text)
+LANGUAGE sql STABLE AS $$
+  SELECT count(*)::int, pg_current_snapshot()
+  FROM snap_test
+$$;
+```
+```sql
+-- Сеанс 1
+BEGIN ISOLATION LEVEL READ COMMITTED;                    
+SELECT f_stable(), f_volatile(), pg_current_snapshot();
+```
+```sql
+-- Сеанс 2
+INSERT INTO snap_test VALUES (2,'row#2');
+COMMIT;
+```
+```sql
+-- Сеанс 1
+SELECT f_stable(), f_volatile(), pg_current_snapshot();
+COMMIT;
+```
+
+```sql
+-- Сеанс 1
+BEGIN ISOLATION LEVEL REPEATABLE READ;                          
+SELECT f_stable(), f_volatile(), pg_current_snapshot();
+```
+```sql
+-- Сеанс 2
+INSERT INTO snap_test VALUES (3,'row#3');
+COMMIT;
+SELECT f_stable(), f_volatile(), pg_current_snapshot();
+```
+```sql
+-- Сеанс 1
+SELECT f_stable(), f_volatile(), pg_current_snapshot();
+COMMIT;
+```
+--Фрагмент кода
+```text
+-- Сеанс 1
+CREATE FUNCTION
+
+CREATE FUNCTION
+
+CREATE FUNCTION
+```
+```text
+-- Сеанс 1
+BEGIN
+ f_stable | f_volatile | pg_current_snapshot 
+----------+------------+---------------------
+        1 |          1 | 910:910:
+(1 row)
+```
+```text
+-- Сеанс 2
+INSERT 0 1
+
+WARNING:  there is no transaction in progress
+COMMIT
+```
+```text
+-- Сеанс 1
+ f_stable | f_volatile | pg_current_snapshot 
+----------+------------+---------------------
+        2 |          2 | 911:911:
+(1 row)
+
+COMMIT
+```
+```text
+-- Сеанс 1
+BEGIN
+ f_stable | f_volatile | pg_current_snapshot 
+----------+------------+---------------------
+        2 |          2 | 911:911:
+(1 row)
+```
+```text
+-- Сеанс 2
+INSERT 0 1
+
+WARNING:  there is no transaction in progress
+COMMIT
+
+ f_stable | f_volatile | pg_current_snapshot 
+----------+------------+---------------------
+        3 |          3 | 912:912:
+```
+```text
+-- Сеанс 1
+ f_stable | f_volatile | pg_current_snapshot 
+----------+------------+---------------------
+        2 |          2 | 911:911:
+(1 row)
+
+COMMIT
+```
+**Выводы: ** Функции STABLE используют снимок на момент начала команды, а VOLATILE видят актуальные данные на момент вызова. В Read Committed оба типа видят недавние изменения, в Repeatable Read STABLE фиксирует данные на начале транзакции, а VOLATILE видит только изменения, завершённые до её начала. STABLE даёт стабильный снимок, VOLATILE потенциально «живее», но всё ещё ограничена снимком транзакции.
+3. Экспорт/импорт снимка: В транзакции 1 (уровень Repeatable Read) экспортировал снимок данных с помощью
+pg_export_snapshot(). В транзакции 2 изменил какие-либо данные и зафиксировал.
+В транзакции 3 импортировал снимок из транзакции 1 (SET TRANSACTION SNAPSHOT
+'...';). Убедился, что в транзакции 3 видны данные в состоянии на момент экспорта снимка, до изменений из транзакции 2.
+```sql
+-- Сеанс 1 (Транзакция 1)
+CREATE TABLE snap_exp(id int primary key, note text);
+INSERT INTO snap_exp VALUES (1,'before export');
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT pg_export_snapshot(); 
+```
+```sql
+-- Сеанс 2 (Транзакция 2)
+INSERT INTO snap_exp VALUES (2,'after export');
+COMMIT;
+
+```
+```sql
+-- Сеанс 3 (Транзакция 3)
+BEGIN;
+SET TRANSACTION ISOLATION LEVEL REPEATABLE READ;
+
+SET TRANSACTION SNAPSHOT '00000006-000000C7-1';
+
+SELECT * FROM snap_exp ORDER BY id; 
+COMMIT;
+```
+```sql
+-- Сеанс 1
+COMMIT;
+```
+-- фрагменты выводов
+```text
+-- Сеанс 1 (Транзакция 1)
+CREATE TABLE
+
+INSERT 0 1
+
+BEGIN
+
+ pg_export_snapshot  
+---------------------
+ 00000006-000000C7-1
+(1 row)
+```
+```text
+-- Сеанс 2 (Транзакция 2)
+INSERT 0 1
+WARNING:  there is no transaction in progress
+COMMIT
+```
+```text
+-- Сеанс 3 (Транзакция 3)
+BEGIN
+
+SET
+
+SET
+
+ id |     note      
+----+---------------
+  1 | before export
+(1 row)
+
+COMMIT
+```
+```text
+-- Сеанс 1
+COMMIT
+```
+### Вывод: В ходе лабораторной работы  я получил практический опыт работы с MVCC в PostgreSQL, изучил влияние уровней изоляции на видимость данных, освоил анализ версий строк и страниц через pageinspect и научился интерпретировать снимки для объяснения различий между транзакциями. Работа укрепила понимание того, как PostgreSQL обеспечивает параллелизм при сохранении согласованности данных.
+

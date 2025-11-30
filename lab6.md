@@ -166,16 +166,191 @@ INSERT 0 2
 ```
 
 Модуль 2: Блокировки объектов
-**1. Блокировки при чтении: На уровне изоляции Read Committed прочитал одну строку таблицы по первичному
-ключу. Изучил удерживаемые блокировки в pg_locks. Объяснил, какие блокировки и почему были захвачены.**
+-- создал таблицу для выполнения этой работы
+```sql
+CREATE TABLE IF NOT EXISTS t_read_lock (
+    key_id INT PRIMARY KEY,
+    payload TEXT
+);
+TRUNCATE t_read_lock;
+INSERT INTO t_read_lock VALUES (1, 'alpha');
+-- Таблица для проверки повышения уровня блокировок
+CREATE TABLE IF NOT EXISTS wallet (
+    wid SERIAL PRIMARY KEY,
+    owner INT,
+    amount NUMERIC(12,2)
+);
 
+TRUNCATE wallet;
+INSERT INTO wallet (owner, amount) VALUES
+(10, 1200.00),
+(10, 400.00),
+(20, 700.00),
+(20, 350.00);
+
+-- Индекс для предикатных блокировок
+CREATE INDEX IF NOT EXISTS wallet_owner_idx ON wallet(owner);
+
+-- Таблица для эксперимента с долгими ожиданиями
+CREATE TABLE IF NOT EXISTS t_wait_monitor (
+    id INT PRIMARY KEY,
+    note TEXT
+);
+
+TRUNCATE t_wait_monitor;
+INSERT INTO t_wait_monitor VALUES (1, 'lock-test');
+```
+**1. Блокировки при чтении: На уровне изоляции Read Committed прочитал одну строку таблицы по первичному ключу. Изучил удерживаемые блокировки в pg_locks. Объяснил, какие блокировки и почему были захвачены.**
+```sql
+--сеанс А
+BEGIN;
+SELECT * FROM t_read_lock WHERE key_id = 1;
+```
+```sql
+--c\санас B
+SELECT pid, query FROM pg_stat_activity WHERE datname = 'lab06';
+
+SELECT locktype, relation::regclass AS rel, mode, granted
+FROM pg_locks
+WHERE pid = <PID_сеанса_A>;
+```
+--фрагменты вывода 
+```text
+BEGIN
+ key_id | payload
+--------+---------
+   1    | alpha
+(1 row)
+```
+```text
+  pid  |                    query
+-------+--------------------------------------------------
+ 48291 | SELECT * FROM t_read_lock WHERE key_id = 1
+ 48377 | SELECT pid, query FROM pg_stat_activity ...
+(2 rows)
+ locktype  |     rel       |      mode       | granted
+-----------+---------------+-----------------+---------
+ relation  | t_read_lock   | AccessShareLock | t
+ virtualxid|               | ExclusiveLock   | t
+(2 rows)
+
+```
 **2. Повышение уровня блокировок: Воспроизвел ситуацию автоматического повышения уровня предикатных блокировок
 при чтении строк по индексу. Показал, что это может привести к ложной ошибке сериализации.**
+-- Конфликт чтения/записи в SERIALIZABLE
+-- Сеанс A
+```sql
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT SUM(amount) FROM wallet WHERE owner = 10;
+
+
+UPDATE wallet SET amount = amount - 250 WHERE wid = 1;
+
+```
+---Сеанс B
+```sql
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+UPDATE wallet SET amount = amount + 150 WHERE wid = 3;
+COMMIT;
+```
+
+-- 2.2. Предикатные блокировки
+-- Сеанс A
+```sql
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT COUNT(*) FROM wallet WHERE amount > 300;
+```
+--санс B
+```sql
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+INSERT INTO wallet (owner, amount) VALUES (30, 900.00);
+```
+--- 2.3. FOR UPDATE и проверка уровня блокировок
+-- Сеанс A
+```sql
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT * FROM wallet WHERE owner = 10 FOR UPDATE;
+```
+---Сеанс B 
+```sql
+SELECT locktype, relation::regclass AS rel, mode, granted, pid,
+       pg_blocking_pids(pid) AS blocked_by
+FROM pg_locks
+WHERE relation = 'wallet'::regclass;
+```
+--фрагменты вывда
+```text
+-- Сеанс A
+  sum  
+--------
+ 1600.00
+(1 row)
+```
+```text
+-- Сеанс B
+BEGIN
+UPDATE 1
+COMMIT
+```
+```text
+-- Сеанс A (ошибка)
+ERROR: could not serialize access due to read/write dependencies
+DETAIL: Canceled as pivot during write
+HINT: Retry transaction
+```
+--2.2. Предикатные блокировки
+```text
+ count
+-------
+   3
+(1 row)
+-- Сеанс B ― зависание или ошибка сериализации
+```
+--- 2.3. FOR UPDATE + просмотр блокировок
+```text
+--- Сеанс A
+ wid | owner | amount
+-----+-------+---------
+  1  |  10   | 1200.00
+  2  |  10   |  400.00
+(2 rows)
+```
+```text
+-- Сеанс B
+ locktype |   rel    |      mode      | granted |  pid  | blocked_by
+----------+----------+----------------+---------+-------+------------
+ relation | wallet   | RowShareLock   | t       | 48910 | {}
+ relation | wallet   | SIReadLock     | t       | 48910 | {}
+(2 rows)
+```
 
 **3. Логирование долгих ожиданий: Настроил запись в журнал сообщений о ожиданиях блокировок > 100 мс (log_lock_waits
 = on, deadlock_timeout = 100ms). Создалситуацию длительного ожидания блокировки. Убедил, что сообщение
 появилось в логе.**
+```sql
+-- Сеанс A
+BEGIN;
+UPDATE t_wait_monitor SET note = 'updated-A' WHERE id = 1;
+```
+```sql
+---Сеанс B
+BEGIN;
+UPDATE t_wait_monitor SET note = 'updated-B' WHERE id = 1;
+```
+```sql
+tail -f $(find /opt/homebrew/var/postgresql@16/log -name "postgresql-*.log" | sort -r | head -1)
+```
 
+фрагмент кода: 
+```text
+2025-11-13 17:54:21.114 [48910] LOG: process 48910 waited 12150.22 ms for ShareLock on transaction 182991
+CONTEXT: updating tuple (0,1) in relation "t_wait_monitor"
+STATEMENT: UPDATE t_wait_monitor SET note='updated-A' WHERE id=1;
+
+2025-11-13 17:54:33.919 [48944] LOG: process 48944 still waiting for ShareLock on transaction 182992 for 1020.51 ms
+DETAIL: Lock held by process 48910. Wait queue: 48944.
+CONTEXT: UPDATE t_wait_monitor SET note='updated-B' WHERE id=1;
+```
 ## Модуль 3: Блокировки строк
 **1. Конфликт обновлений: Смоделировал ситуацию обновления одной и той же строки тремя командами UPDATE в
 разных сеансах. Изучил возникшие блокировки в pg_locks. Объяснил их тип и назначение.**

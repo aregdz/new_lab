@@ -314,11 +314,257 @@ UPDATE 1
 Проведел простой тест: выполнил контрольную точку, затем серию изменений в таблице
 (например, с помощью pgbench), измерил объем WAL.
 Повторил тест с разным значением full_page_writes. Объясните разницу в результатах.**
-# СПРОСИТЬ 
+
+```sql
+DROP TABLE wal_lsn_test;
+CREATE TABLE wal_lsn_test(
+  id   serial PRIMARY KEY,
+  txt  text
+);
+CHECKPOINT;
+-- full_page_writes = вкл.                          
+SELECT pg_current_wal_lsn();
+BEGIN;
+INSERT INTO wal_lsn_test VALUES (1, 'text1');
+INSERT INTO wal_lsn_test VALUES (2, 'text2');
+INSERT INTO wal_lsn_test VALUES (3, 'text3');
+COMMIT;
+SELECT pg_current_wal_lsn() -'0/693B2BE0'::pg_lsn;
+```
+```sql
+DROP TABLE wal_lsn_test;
+CREATE TABLE wal_lsn_test(
+  id   serial PRIMARY KEY,
+  txt  text
+);
+ALTER SYSTEM SET full_page_writes = off;
+SELECT pg_reload_conf();
+CHECKPOINT;
+-- full_page_writes = выкл.                          
+SELECT pg_current_wal_lsn();
+BEGIN;
+INSERT INTO wal_lsn_test VALUES (1, 'text1');
+INSERT INTO wal_lsn_test VALUES (2, 'text2');
+INSERT INTO wal_lsn_test VALUES (3, 'text3');
+COMMIT;
+SELECT pg_current_wal_lsn() -'0/693DE2C8'::pg_lsn;
+```
+-- фрагмент вывода
+```text
+DROP TABLE
+
+CREATE TABLE
+
+CHECKPOINT
+
+ pg_current_wal_lsn 
+--------------------
+ 0/693B2BE0
+(1 row)
+
+BEGIN
+
+INSERT 0 1
+
+INSERT 0 1
+
+INSERT 0 1
+
+COMMIT
+
+ ?column? 
+----------
+    21736
+(1 row)
+```
+
+```text
+DROP TABLE
+
+CREATE TABLE
+
+ALTER SYSTEM
+
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+CHECKPOINT
+
+ pg_current_wal_lsn 
+--------------------
+ 0/693DE2C8
+(1 row)
+
+BEGIN
+
+INSERT 0 1
+
+INSERT 0 1
+
+INSERT 0 1
+
+COMMIT
+
+ ?column? 
+----------
+     7216
+(1 row)
+```
+
+
+
+
 **2. Эффективность сжатия WAL:
 Изучил влияние параметра wal_compression (вкл./выкл.) на объем WAL.
 Провел тест, аналогичный п.1, с включенным и выключенным сжатием.
 Определил, во сколько раз уменьшается размер WAL-записей при использовании сжатия.**
+```sql
+ALTER SYSTEM SET full_page_writes = on;
+SELECT pg_reload_conf();
+DROP TABLE wal_lsn_test;
+CREATE TABLE wal_lsn_test(
+  id   serial PRIMARY KEY,
+  txt  text
+);
+CHECKPOINT;
+-- wal_compression = выкл.                          
+SELECT pg_current_wal_lsn();
+BEGIN;
+INSERT INTO wal_lsn_test VALUES (1, 'text1');
+INSERT INTO wal_lsn_test VALUES (2, 'text2');
+INSERT INTO wal_lsn_test VALUES (3, 'text3');
+COMMIT;
+SELECT pg_current_wal_lsn() -'0/6940A9B0'::pg_lsn;
+```
+```sql
+DROP TABLE wal_lsn_test;
+CREATE TABLE wal_lsn_test(
+  id   serial PRIMARY KEY,
+  txt  text
+);
+ALTER SYSTEM SET wal_compression = on;
+SELECT pg_reload_conf();
+CHECKPOINT;
+-- wal_compression = вкл.                          
+SELECT pg_current_wal_lsn();
+BEGIN;
+INSERT INTO wal_lsn_test VALUES (1, 'text1');
+INSERT INTO wal_lsn_test VALUES (2, 'text2');
+INSERT INTO wal_lsn_test VALUES (3, 'text3');
+COMMIT;
+SELECT pg_current_wal_lsn() -'0/693DE2C8'::pg_lsn;
+```
+
+-- фрагмент вывода 
+```text
+DROP TABLE
+
+CREATE TABLE
+
+CHECKPOINT
+
+ pg_current_wal_lsn 
+--------------------
+ 0/6940A9B0
+(1 row)
+
+BEGIN
+
+INSERT 0 1
+
+INSERT 0 1
+
+INSERT 0 1
+
+COMMIT
+
+ ?column? 
+----------
+    19448
+(1 row)
+```
+```text
+DROP TABLE
+
+CREATE TABLE
+
+ALTER SYSTEM
+
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+CHECKPOINT
+
+ pg_current_wal_lsn 
+--------------------
+ 0/69437900
+(1 row)
+
+BEGIN
+
+INSERT 0 1
+
+INSERT 0 1
+
+INSERT 0 1
+
+COMMIT
+
+ ?column? 
+----------
+   370592
+(1 row)
+
+ ?column? 
+----------
+     4512
+(1 row)
+```
+
+## Ответы на вопросы: 
+# МОДУЛЬ 1
+
+## Модуль 1, вопрос 1  
+За буферный кеш отвечают процессы checkpointer и background writer, которые записывают изменённые страницы на диск. За работу журнала WAL отвечает процесс walwriter, выполняющий сброс WAL-записей на диск.
+
+## Модуль 1, вопрос 2  
+При остановке в режиме fast сервер корректно завершает работу: прерывает активные транзакции, выполняет контрольную точку и записывает все изменения на диск. В журнале видно начало и завершение контрольной точки, после чего — сообщение о штатном завершении сервера.
+
+## Модуль 1, вопрос 3  
+При остановке в режиме immediate сервер завершается мгновенно и без контрольной точки, что эквивалентно аварийному завершению. После перезапуска выполняется восстановление по WAL: в журнале появляются записи о crash recovery. В отличие от режима fast, сервер восстанавливает состояние, повторяя завершённые транзакции и откатывая незавершённые.
 
 
+# МОДУЛЬ 2
 
+## Модуль 2, вопрос 1  
+Размер таблицы на диске соответствует числу занятых ею страниц, а количество буферов в кеше показывает, какие страницы таблицы были недавно использованы. Обычно таблица занимает больше страниц на диске, чем страниц находится в кеше.
+
+## Модуль 2, вопрос 2  
+До выполнения CHECKPOINT в кеше есть «грязные» страницы — изменённые, но не записанные на диск. После выполнения CHECKPOINT их количество резко уменьшается, потому что контрольная точка принудительно записывает все такие страницы на диск.
+
+## Модуль 2, вопрос 3  
+После pg_prewarm таблица действительно попадает в буферный кеш, однако после перезапуска кеш очищается, и таблица в нём не остаётся. Это показывает, что pg_prewarm работает только в пределах текущего запуска и не сохраняет данные в кеше между перезапусками.
+
+
+# МОДУЛЬ 3
+
+## Модуль 3, вопрос 1  
+Размер сгенерированных WAL-записей определяется разницей позиций LSN. Он оказывается довольно большим, поскольку WAL включает не только данные строк, но и служебную информацию о структуре страниц.
+
+## Модуль 3, вопрос 2  
+Объём WAL велик из-за того, что в него пишутся заголовки, метаданные, структурные изменения страниц и, при необходимости, полные копии страниц. Это объясняет значительный размер WAL даже при небольших изменениях.
+
+## Модуль 3, вопрос 3  
+После сбоя зафиксированные изменения сохраняются, а незавершённые транзакции откатываются. В журнале появляются сообщения о выполнении crash recovery, где фиксируются начало и окончание применения WAL и достижение согласованного состояния.
+
+# МОДУЛЬ 4
+
+## Модуль 4, вопрос 1  
+Параметр full_page_writes увеличивает объём WAL, поскольку заставляет записывать в журнал полные копии страниц при их первой модификации после контрольной точки. При отключении параметра объём WAL заметно уменьшается, так как записываются только реальные изменения.
+
+## Модуль 4, вопрос 2  
+Включённый параметр wal_compression уменьшает объём WAL за счёт сжатия полных копий страниц. Степень уменьшения зависит от структуры данных, но обычно WAL становится в несколько раз меньше, чем при отключённом сжатии.

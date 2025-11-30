@@ -19,33 +19,86 @@
 ##Модуль 1: Мониторинг активности
 **1. Статистика таблиц: В новой базе данных создалйте таблицу monitor_test (id INT). Вставил несколько строк,
 затем удалил все. Изучил статистику обращений к таблице в pg_stat_all_tables (n_tup_ins, n_tup_del, n_live_tup, n_dead_tup). Сопоставил с действиями. Выполнил VACUUM. Снова проверил статистику. Объяснил изменения.**
-```bash
-ps -ef | grep -E "post(gres|master)|checkpointer|writer|wal" | grep -v grep
+```sql
+-- Создание таблицы и вставка данных
+CREATE TABLE monitor_test (id INT);
+INSERT INTO monitor_test VALUES (1), (2), (3);
+DELETE FROM monitor_test;
+
+-- Обновление статистики для планировщика
+ANALYZE monitor_test;
+
+-- Просмотр статистики после вставки и удаления
+SELECT schemaname, relname, n_tup_ins, n_tup_del, n_live_tup, n_dead_tup 
+FROM pg_stat_all_tables 
+WHERE relname = 'monitor_test';
+
+```
+```sql
+-- Выполнение VACUUM и повторная проверка статистики
+VACUUM monitor_test;
+
+SELECT schemaname, relname, n_tup_ins, n_tup_del, n_live_tup, n_dead_tup 
+FROM pg_stat_all_tables 
+WHERE relname = 'monitor_test';
 ```
 -- Фрагменты вывода:
 ```text
-/main -c config_file=/etc/postgresql/16/main/postgresql.conf
-postgres     797     787  0 08:34 ?        00:00:00 postgres: 16/main: checkpointer 
-postgres     798     787  0 08:34 ?        00:00:00 postgres: 16/main: background writer 
-postgres     977     787  0 08:34 ?        00:00:00 postgres: 16/main: walwriter 
-postgres     978     787  0 08:34 ?        00:00:02 postgres: 16/main: autovacuum launcher 
-postgres     979     787  0 08:34 ?        00:00:00 postgres: 16/main: logical replication launcher 
-student     6148    1601  0 08:46 pts/0    00:00:00 /usr/lib/postgresql/16/bin/psql
-```
+   schemaname |    relname    | n_tup_ins | n_tup_del | n_live_tup | n_dead_tup 
+--------------+---------------+-----------+-----------+------------+------------
+ public       | monitor_test  |         3 |         3 |          0 |          3
+(1 строка)
 
+```
+```text
+   schemaname |    relname    | n_tup_ins | n_tup_del | n_live_tup | n_dead_tup 
+--------------+---------------+-----------+-----------+------------+------------
+ public       | monitor_test  |         3 |         3 |          0 |          0
+(1 строка)
+
+```
 
 **2. Взаимоблокировка:
 Создал ситуацию взаимоблокировки двух транзакций (например, изменение двух строк в
 разном порядке). Изучил, какая информация записывается в журнал сообщений сервера при обнаружении взаимоблокировки.**
-```bash
-sudo pg_ctlcluster 16 main stop -m fast
-sudo pg_ctlcluster 16 main start
-sudo tail -n 200 /var/log/postgresql/postgresql-16-main.log
-```
+```sql
 -- Фрагменты вывода:
 ```text
-2025-10-09 08:53:20.243 MSK [797] LOG:  checkpoint starting: shutdown immediate
-2025-10-09 08:53:20.250 MSK [797] LOG:  checkpoint complete: wrote 0 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.001 s, sync=0.001 s, total=0.009 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=22877 kB; lsn=0/64E8C0F0, redo lsn=0/64E8C0F0
+-- Сеанс 1
+CREATE TABLE
+INSERT 0 2
+BEGIN
+UPDATE 1
+```
+```text
+-- Сеанс 2
+BEGIN
+UPDATE 1
+```
+```text
+-- Сеанс 1
+UPDATE 1
+```
+```text
+-- Сеанс 2
+ERROR:  deadlock detected
+DETAIL:  Process 97289 waits for ShareLock on transaction 366333; blocked by process 94625.
+Process 94625 waits for ShareLock on transaction 366334; blocked by process 97289.
+HINT:  See server log for query details.
+CONTEXT:  while updating tuple (0,1) in relation "dead_demo"
+
+ROLLBACK
+```
+```text
+-- Сеанс 1
+ROLLBACK
+```
+```text
+2025-10-09 13:20:42.866 MSK [97289] student@lab06_db ERROR:  deadlock detected
+2025-10-09 13:20:42.866 MSK [97289] student@lab06_db DETAIL:  Process 97289 waits for ShareLock on transaction 366333; blocked by process 94625.
+	Process 94625 waits for ShareLock on transaction 366334; blocked by process 97289.
+	Process 97289: UPDATE dead_demo SET val=22 WHERE id=1;
+	Process 94625: UPDATE dead_demo SET val=12 WHERE id=2;
 ```
 
 
@@ -54,124 +107,75 @@ sudo tail -n 200 /var/log/postgresql/postgresql-16-main.log
 Выполнил несколько произвольных запросов.
 Изучил информацию в представлении pg_stat_statements (топ запросов, время
 выполнения и т.д.).**
-```bash
-sudo pg_ctlcluster 16 main stop -m immediate
-sudo pg_ctlcluster 16 main start
-sudo tail -n 200 /var/log/postgresql/postgresql-16-main.log
+```sql
+ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';
+SELECT pg_reload_conf();
+CREATE EXTENSION pg_stat_statements;
+SELECT count(*) FROM dead_demo;
+SELECT * FROM dead_demo WHERE id=1;
+SELECT * FROM dead_demo WHERE id=2;
+INSERT INTO dead_demo VALUES (9,32),(10,45);
+SELECT query, calls, total_plan_time, total_exec_time, 
+mean_plan_time, mean_exec_time, rows
+FROM pg_stat_statements;
 ```
+
 -- Фрагменты вывода:
 ```text
-2025-10-09 10:06:08.573 MSK [38667] LOG:  database system was not properly shut down; automatic recovery in progress
-2025-10-09 10:06:08.786 MSK [38667] LOG:  redo starts at 0/5837B058
-2025-10-09 10:06:08.984 MSK [38667] LOG:  invalid record length at 0/5837B058: expected at least 24, got 0
-2025-10-09 10:06:09.345 MSK [38667] LOG:  redo done at 0/5837B058 system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
-2025-10-09 10:06:09.563 MSK [38666] LOG:  checkpoint starting: end-of-recovery immediate wait
-2025-10-09 10:06:12.351 MSK [39813] LOG:  checkpoint complete: wrote 3 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.003 s, sync=0.002 s, total=0.013 s; sync files=2, longest=0.001 s, average=0.001 s; distance=0 kB, estimate=0 kB; lsn=0/5837B058, redo lsn=0/5837B058
+ALTER SYSTEM
+
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+CREATE EXTENSION
+
+ count 
+-------
+     8
+(1 row)
+
+ id | val 
+----+-----
+  1 |  10
+(1 row)
+
+ id | val 
+----+-----
+  2 |  20
+(1 row)
+
+INSERT 0 2
+```
+```text
+ INSERT INTO dead_demo VALUES ($1,$2),($3,$4)                     |     1 |               0 |            0.042891 |              0 |            0.042891 |    2
+ SELECT calls, total_plan_time, total_exec_time,                 +|     1 |               0 | 0.10167699999999999 |              0 | 0.10167699999999999 |    9
+ mean_plan_time, mean_exec_time, rows, query                     +|       |                 |                     |                |                     | 
+ FROM pg_stat_statements                                          |       |                 |                     |                |                     | 
+ SELECT * FROM dead_demo WHERE id=$1                              |     2 |               0 |            0.031036 |              0 |            0.015518 |    2
+ SELECT query, calls                                             +|     1 |               0 | 0.08881399999999999 |              0 | 0.08881399999999999 |    7
+         FROM pg_stat_statements                                  |       |                 |                     |                |                     | 
+ SELECT pg_reload_conf()                                          |     1 |               0 |            0.060778 |              0 |            0.060778 |    1
+ SHOW shared_preload_libraries                                    |     1 |               0 |            0.004164 |              0 |            0.004164 |    0
+ SELECT * FROM pg_stat_statements                                 |     3 |               0 |            0.437348 |              0 | 0.14578266666666667 |   21
+ SELECT count(*) FROM dead_demo                                   |     1 |               0 |            0.064402 |              0 |            0.064402 |    1
+ SELECT * FROM pg_stat_statements LIMIT $1                        |     1 |               0 |            0.125855 |              0 |            0.125855 |    8
+ ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements' |     1 |               0 |            7.280041 |              0 |            7.280041 |    0
+(10 rows)
 ```
 
 Модуль 2: Блокировки объектов
 **1. Блокировки при чтении: На уровне изоляции Read Committed прочитал одну строку таблицы по первичному
 ключу. Изучил удерживаемые блокировки в pg_locks. Объяснил, какие блокировки и почему были захвачены.**
-```sql
-CREATE DATABASE lab05_db;
-\c lab05_db
-CREATE TABLE wal_test(id int PRIMARY KEY, data text);
-INSERT INTO wal_test
-SELECT g, repeat('x', 200)
-FROM generate_series(1, 100000) AS g;
-SELECT pg_relation_size('wal_test');
-SELECT current_setting('block_size')::int;
-WITH rel AS (
-  SELECT oid, pg_relation_filenode(oid) AS fn
-  FROM pg_class WHERE relname = 'wal_test'
-)
-SELECT
-  count(*) AS buffers
-FROM pg_buffercache b
-JOIN rel r
-  ON b.reldatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
- AND b.relfilenode = r.fn
- AND b.relforknumber = 0;
-
-```
--- фрагмент кода
-```text
-CREATE TABLE
-INSERT 0 100000
- pg_relation_size 
-------------------
-         24100864
-(1 row)
-
- current_setting 
------------------
-            8192
-(1 row)
-
- buffers 
----------
-    2942
-(1 row)
-
-```
 
 **2. Повышение уровня блокировок: Воспроизвел ситуацию автоматического повышения уровня предикатных блокировок
 при чтении строк по индексу. Показал, что это может привести к ложной ошибке сериализации.**
-```sql
-SELECT count(*) FROM pg_buffercache WHERE isdirty IS TRUE;
-CHECKPOINT;
-SELECT count(*) FROM pg_buffercache WHERE isdirty IS TRUE;
-```
--- фрагмент кода
-```text
- count 
--------
-  3291
-(1 row)
-
-CHECKPOINT
-
- count 
--------
-     0
-(1 row)
-
-```
 
 **3. Логирование долгих ожиданий: Настроил запись в журнал сообщений о ожиданиях блокировок > 100 мс (log_lock_waits
 = on, deadlock_timeout = 100ms). Создалситуацию длительного ожидания блокировки. Убедил, что сообщение
 появилось в логе.**
-```sql
-CREATE EXTENSION pg_prewarm;
-SELECT pg_prewarm('wal_test');
-```
-```bash
-sudo pg_ctlcluster 16 main restart
-```
-```sql
-WITH rel AS (
-  SELECT oid, pg_relation_filenode(oid) AS fn
-  FROM pg_class WHERE relname = 'wal_test'
-)
-SELECT count(*) AS buffers
-FROM pg_buffercache b
-JOIN rel r
-  ON b.reldatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
- AND b.relfilenode = r.fn
- AND b.relforknumber = 0;
-```
--- фрагмент кода
-```text
- pg_prewarm 
-------------
-       2942
-(1 row)
-```
-```text
- buffers 
----------
-       0
-```
+
 ## Модуль 3: Блокировки строк
 **1. Конфликт обновлений: Смоделировал ситуацию обновления одной и той же строки тремя командами UPDATE в
 разных сеансах. Изучил возникшие блокировки в pg_locks. Объяснил их тип и назначение.**

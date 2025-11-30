@@ -172,3 +172,292 @@ JOIN rel r
 ---------
        0
 ```
+## Модуль 3: Блокировки строк
+**1. Конфликт обновлений: Смоделировал ситуацию обновления одной и той же строки тремя командами UPDATE в
+разных сеансах. Изучил возникшие блокировки в pg_locks. Объяснил их тип и назначение.**
+```sql
+SELECT 
+    l.pid,
+    l.locktype,
+    l.granted,
+    l.transactionid,
+    l.relation::regclass AS relation,
+    l.page,
+    l.tuple
+FROM pg_locks l
+LEFT JOIN pg_stat_activity a ON l.pid = a.pid
+ORDER BY l.pid, l.locktype;
+```
+фрвгмент вывода
+```text
+ pid   |    locktype     | granted | transactionid |   relation   | page | tuple
+-------+------------------+---------+----------------+--------------+------+--------
+104958 | transactionid    | t       | 366378         |              |      |
+104958 | relation         | t       |                | row_demo     |      |
+104958 | accesssharelock  | t       |                | pg_class     |      |
+
+141471 | transactionid    | f       | 366378         |              |      |
+141471 | tuple            | t       |                | row_demo     | 0    | 1
+141471 | transactionid    | t       | 366375         |              |      |
+141471 | relation         | t       |                | row_demo     |      |
+
+169532 | tuple            | f       |                | row_demo     | 0    | 1
+169532 | transactionid    | t       | 366379         |              |      |
+169532 | relation         | t       |                | row_demo     |      |
+```
+PID 104958 — процесс, который никого не ждёт, но держит ресурсы
+PID 141471 — процесс, который одновременно ждёт и блокирует других
+PID 169532 — процесс, который только ждёт
+
+**2. Взаимоблокировка трех транзакций: Воспроизвел взаимоблокировку трех транзакций. Проанализировал журнал сообщений сервера. ?**
+1 сеанс
+```sql
+BEGIN;
+UPDATE row_demo SET val = 101 WHERE id = 1;  -- захватываем строку id=1
+```
+
+2 сеанс
+```sql
+BEGIN;
+UPDATE row_demo SET val = 202 WHERE id = 2;  -- захватываем строку id=2
+```
+
+3 сеанс
+```sql
+BEGIN;
+UPDATE row_demo SET val = 303 WHERE id = 3;  -- захватываем строку id=3
+```
+--- Создание цикла блокировок
+1 сеанс
+```sql
+UPDATE row_demo SET val = 111 WHERE id = 2;  -- ждёт Сеанс B
+```
+
+2 сеанс
+```sql
+UPDATE row_demo SET val = 222 WHERE id = 3;  -- ждёт Сеанс C
+```
+
+3 сеанс
+```sql
+UPDATE row_demo SET val = 333 WHERE id = 1;  -- ждёт Сеанс A → возникает DEADLOCK
+```
+просмотр лога
+```sql
+tail -f $(find /opt/homebrew/var/postgresql@16/log -name "postgresql-*.log" -type f | sort -r | head -1)
+```
+**выводы: Сеанс A ждёт B, B ждёт C, C ждёт A → возник цикл взаимоблокировки. PostgreSQL фиксирует deadlock автоматически, завершает одну из транзакций и выдаёт ошибку. По журналу легко понять, какой процесс кого блокирует и какие SQL-запросы вызвали тупик.**
+
+**3. Взаимоблокировка UPDATE: Попытался воспроизвести ситуацию, когда две транзакции, выполняющие по одному UPDATE на одной таблице, взаимоблокируются. Объяснил, возможно ли это.**
+```sql
+-- Сеанс 1
+BEGIN;
+UPDATE row_demo SET v=v+1 WHERE id=1;      
+```
+```sql
+-- Сеанс 2
+BEGIN;
+UPDATE row_demo SET v=v+1 WHERE id=1;      
+```
+--фрагменты вывода
+```text
+-- Сеанс 1
+BEGIN
+UPDATE 1
+  
+```
+```text
+-- Сеанс 2
+BEGIN
+```
+
+## Модуль 4: Блокировки в оперативной памяти
+**1. Закрепление буферов курсором: Используя pg_buffercache, убедителся, что открытый курсор удерживает закрепление буфера (pinning) для быстрого чтения следующей строки.**
+```sql
+-- Сеанс 1
+CREATE TABLE pin_demo(id int primary key, t text);
+INSERT INTO pin_demo SELECT g, repeat('x',100) FROM generate_series(1,5000) g;
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM pin_demo ORDER BY id;
+FETCH 1 FROM c;
+```
+```sql
+-- Сеанс 2
+CREATE EXTENSION pg_buffercache;
+WITH me(db) AS (SELECT oid FROM pg_database WHERE datname=current_database())
+SELECT bufferid, relblocknumber, pinning_backends AS pinning_pid
+FROM pg_buffercache
+WHERE reldatabase  = (SELECT db FROM me)
+  AND relfilenode  = pg_relation_filenode('pin_demo'::regclass)
+  AND relforknumber= 0
+  AND pinning_backends IS NOT NULL
+  AND pinning_backends <> 0;
+```
+фрагмент вывода
+```text
+CREATE TABLE
+
+INSERT 0 5000
+
+BEGIN
+
+DECLARE CURSOR
+
+ id |                                                  t                                                   
+----+------------------------------------------------------------------------------------------------------
+  1 | xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+(1 row)
+```
+```text
+--Сеанс 2
+ bufferid | relblocknumber | pinning_pid 
+----------+----------------+-------------
+      429 |              0 |           1
+(1 row)
+```
+
+
+
+**2. VACUUM и закрепление буферов: Откройте курсор на таблице. Не закрывая его, выполнил VACUUM этой таблицы. Определил, будет ли VACUUM ожидать освобождения закрепления буфера.**
+```sql
+-- Сеанс 2
+ALTER TABLE pin_demo SET (autovacuum_enabled = off);
+VACUUM (VERBOSE) pin_demo;
+
+```
+```sql
+-- Сеанс 3
+SELECT pid, wait_event_type, wait_event, state, query
+FROM pg_stat_activity
+WHERE query ILIKE 'VACUUM%' AND datname = current_database();
+```
+фрагмент вывода
+```text
+ALTER TABLE
+
+INFO:  vacuuming "lab06_db.public.pin_demo"
+INFO:  finished vacuuming "lab06_db.public.pin_demo": index scans: 0
+pages: 0 removed, 87 remain, 2 scanned (2.30% of total)
+tuples: 0 removed, 4955 remain, 0 are dead but not yet removable
+removable cutoff: 366421, which was 1 XIDs old when operation ended
+frozen: 0 pages from table (0.00% of total) had 0 tuples frozen
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+buffer usage: 13 hits, 0 misses, 0 dirtied
+WAL usage: 1 records, 0 full page images, 237 bytes
+system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+INFO:  vacuuming "lab06_db.pg_toast.pg_toast_57534"
+INFO:  finished vacuuming "lab06_db.pg_toast.pg_toast_57534": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total)
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: 366421, which was 1 XIDs old when operation ended
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+buffer usage: 6 hits, 0 misses, 0 dirtied
+WAL usage: 0 records, 0 full page images, 0 bytes
+system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+VACUUM
+```
+```text
+ pid  | wait_event_type | wait_event | state |           query            
+------+-----------------+------------+-------+----------------------------
+ 7019 | Client          | ClientRead | idle  | VACUUM (VERBOSE) pin_demo;
+(1 row)
+```
+
+**3. VACUUM FREEZE и ожидание: Повторил эксперимент с VACUUM FREEZE. Убедился, что в профиле ожиданий процесса VACUUM появилось ожидание снятия закрепления буфера (buffer pin).**
+```sql
+-- Сеанс 1
+DROP TABLE pin_demo;
+CREATE TABLE pin_demo(id int primary key, t text);
+INSERT INTO pin_demo SELECT g, repeat('x',100) FROM generate_series(1,5000) g;
+BEGIN;
+DECLARE c CURSOR FOR SELECT * FROM pin_demo ORDER BY id;
+FETCH 1 FROM c;
+```
+```sql
+-- Сеанс 2
+ALTER TABLE pin_demo SET (autovacuum_enabled = off);
+VACUUM (VERBOSE, FREEZE) pin_demo;
+
+```
+```sql
+-- Сеанс 3
+SELECT pid, wait_event_type, wait_event, state, query
+FROM pg_stat_activity
+WHERE query ILIKE 'VACUUM%' AND datname = current_database();
+```
+```sql
+-- Сеанс 1
+CLOSE c;
+```
+```sql
+-- Сеанс 3
+SELECT pid, wait_event_type, wait_event, state, query
+FROM pg_stat_activity
+WHERE query ILIKE 'VACUUM%' AND datname = current_database();
+```
+фрагмент вывода
+```text
+INFO:  aggressively vacuuming "lab06_db.public.pin_demo"
+```
+```text
+ pid  | wait_event_type | wait_event | state  |               query                
+------+-----------------+------------+--------+------------------------------------
+ 7019 | BufferPin       | BufferPin  | active | VACUUM (VERBOSE, FREEZE) pin_demo;
+```
+```text
+-- Сеанс 1
+CLOSE CURSOR
+```
+```text
+-- Сеанс 2
+INFO:  finished vacuuming "lab06_db.public.pin_demo": index scans: 0
+pages: 0 removed, 87 remain, 87 scanned (100.00% of total)
+tuples: 0 removed, 5000 remain, 0 are dead but not yet removable
+removable cutoff: 366428, which was 0 XIDs old when operation ended
+new relfrozenxid: 366428, which is 2 XIDs ahead of previous value
+frozen: 87 pages from table (100.00% of total) had 5000 tuples frozen
+index scan not needed: 0 pages from table (0.00% of total) had 0 dead item identifiers removed
+avg read rate: 0.000 MB/s, avg write rate: 0.000 MB/s
+buffer usage: 195 hits, 0 misses, 3 dirtied
+WAL usage: 177 records, 3 full page images, 21471 bytes
+system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 89.75 s
+INFO:  aggressively vacuuming "lab06_db.pg_toast.pg_toast_57541"
+INFO:  finished vacuuming "lab06_db.pg_toast.pg_toast_57541": index scans: 0
+pages: 0 removed, 0 remain, 0 scanned (100.00% of total)
+tuples: 0 removed, 0 remain, 0 are dead but not yet removable
+removable cutoff: 366428, which was 0 XIDs old when operation ended
+new relfrozenxid: 366428, which is 2 XIDs ahead of previous value
+frozen: 0 pages from table (100.00% of total) had 0 tuples frozen
+index scan not needed: 0 pages from table (100.00% of total) had 0 dead item identifiers removed
+avg read rate: 56.205 MB/s, avg write rate: 0.000 MB/s
+buffer usage: 19 hits, 1 misses, 0 dirtied
+WAL usage: 1 records, 0 full page images, 188 bytes
+system usage: CPU: user: 0.00 s, system: 0.00 s, elapsed: 0.00 s
+VACUUM
+```
+```text
+ pid  | wait_event_type | wait_event | state |               query                
+------+-----------------+------------+-------+------------------------------------
+ 7019 | Client          | ClientRead | idle  | VACUUM (VERBOSE, FREEZE) pin_demo;
+(1 row)
+```
+
+#Выводы
+**Модуль 1: Мониторинг активности**
+
+Я наблюдал процессы PostgreSQL, такие как checkpointer, background writer и walwriter. Статистика таблицы отражала выполненные операции, а после VACUUM мёртвые строки очищались. В журнале фиксировались контрольные точки и восстановление после аварийной остановки.
+
+**Модуль 2: Блокировки объектов**
+
+При чтении строк возникали блокировки на уровне транзакций и строк. После выполнения CHECKPOINT грязные буферы очищались, а с помощью pg_prewarm удалось загрузить таблицу в кеш и сохранить часть данных после перезапуска сервера.
+
+**Модуль 3: Блокировки строк**
+
+При одновременном обновлении одной строки разными транзакциями часть процессов держала ресурс, а другие ожидали его освобождения. Взаимоблокировка трёх транзакций создала цикл, после чего сервер завершил одну из них. Анализ журнала позволил понять, какие транзакции кого блокировали.
+
+**Модуль 4: Блокировки в памяти**
+Курсор удерживал буфер для быстрого доступа к данным. VACUUM выполнялся без ожидания, но VACUUM FREEZE фиксировал ожидание снятия закрепления буфера. Журнал показывал использование буферов, генерацию WAL и состояние процесса VACUUM.
+

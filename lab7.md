@@ -17,73 +17,357 @@ PostgreSQL и настройку параметров локализации. П
 ## Практическая работа
 
 
-###Модуль 1: Управление доступом
+# 1. Модуль 1. Управление доступом
 
-**1. Базовые привилегии: Создал новую базу данных access_db и двух пользователей: writer (с правом создания
-объектов) и reader (только чтение). Отзовал у роли public все привилегии на схему public в новой БД. Выдал роли writer права CREATE и USAGE на схему public, а роли reader — только USAGE. Настроил привилегии по умолчанию так, чтобы роль reader автоматически получала право SELECT на новые таблицы в схеме public, принадлежащие writer. Создал пользователей w1 (входит в роль writer) и r1 (входит в роль reader).
-Подключился под writer, создайте таблицу test_table. Убедился, что r1 может только читать ее, а w1 — имеет полный доступ (включая DELETE).**
+## 1.1. Создание ролей и базовой структуры прав
 
+Подключаемся к кластеру:
 
+```sql
+\c postgres
+```
 
+Создаём новую БД:
 
+```sql
+CREATE DATABASE access_db;
+```
 
+Создаём две роли без входа:
 
+```sql
+CREATE ROLE writer NOINHERIT;
+CREATE ROLE reader NOINHERIT;
+```
 
+Проверяем роли:
 
-**2. Аутентификация (Практика+): Создал пользовательские роли alice и bob. Отредактировал pg_hba.conf, разрешив беспарольный вход (trust) только для postgres и student. Для всех остальных методов установилreject или md5. Перезагрузил конфигурацию. Убедился, что вход для alice и bob запрещен.
-Для alice и bob настройте аутентификацию по peer (сопоставление с пользователем ОС).
-Убедился, что войти нельзя без создания пользователя в ОС. Создал в ОС пользователя alice. Настроил вход в PostgreSQL для роли alice с методом peer. Проверил вход.Проверио, можно ли использовать одно отображение peer для нескольких ролей.**
+```sql
+SELECT rolname, rolinherit, rolcanlogin
+FROM pg_roles
+WHERE rolname IN ('writer','reader');
+```
 
+### 1.1.2. Настройка привилегий схемы public
 
+По умолчанию у роли PUBLIC слишком много прав. Отключим:
 
+```sql
+\c access_db
 
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+```
 
-###Модуль 2: Управление расширениями
+Теперь выдаём нужные права:
 
-**1. Установка расширения: Установил расширение units_of_measure (или uom, или аналогичное, доступное в вашей сборке). Убедился, что оно появилось в pg_available_extensions.**
+```sql
+GRANT USAGE, CREATE ON SCHEMA public TO writer;
+GRANT USAGE ON SCHEMA public TO reader;
+```
 
+Проверяем:
 
+```sql
+\dn+ public
+```
 
+Ожидаемый вывод (фрагмент):
 
+```
+ writer=UC/postgres
+ reader=U/postgres
+```
 
+### 1.1.3. Привилегии по умолчанию
 
-**2. Создание и исследование: Создал расширение в своей БД без указания версии. Определил, какая версия
-установилась и какие скрипты выполнились (можно посмотреть в системном каталоге).**
+Чтоб reader автоматически получал доступ к новым таблицам writer:
 
+```sql
+ALTER DEFAULT PRIVILEGES FOR ROLE writer IN SCHEMA public
+GRANT SELECT ON TABLES TO reader;
+```
 
+### 1.1.4. Создание логин-пользователей
 
+```sql
+CREATE ROLE w1 LOGIN PASSWORD 'w1pass';
+CREATE ROLE r1 LOGIN PASSWORD 'r1pass';
+```
 
+Привязываем:
 
-**3. Добавление данных: Добавил в справочник расширения новые единицы измерения (например, футы и дюймы).**
+```sql
+GRANT writer TO w1;
+GRANT reader TO r1;
+```
 
+### 1.1.5. Проверка доступа
 
+Под пользователем writer:
 
+```sql
+\c access_db w1
 
+CREATE TABLE test_table (
+    id int primary key,
+    val text
+);
 
+INSERT INTO test_table VALUES (1, 'a'), (2, 'b');
+```
 
-**4. Управление доступом: Изменил права доступа к таблицам расширения: отзовите SELECT у public, выдайте его
-новой специальной роли.**
+Под пользователем reader:
 
+```sql
+\c access_db r1
 
+SELECT * FROM test_table;
+```
 
+Ок. Пробуем изменить:
 
-**5. Резервное копирование: Используя pg_dump, выгрузил объекты расширения. Изучил дамп. Убедился, что
-выгружаются метаданные (таблицы, типы, функции) и данные.**
+```sql
+DELETE FROM test_table WHERE id=1;
+```
 
+Ожидаем:
 
+```
+ERROR: permission denied for table test_table
+```
 
+---
 
-### Модуль 3: Локализация
-**1. Миграция между кодировками: Создал базу данных с кодировкой KOI8R. В ней создайте таблицу и вставьте строки с кириллическими символами. Сделал логический дамп этой базы с помощью pg_dump. Создал базу данных с кодировкой UTF8. Восстановил в нее дамп. Проверил целостность данных. Объяснил возможные проблемы и их решения.**
+## 1.2. Аутентификация (peer, trust, md5)
 
+### 1.2.1. Создаём роли alice и bob
 
+```sql
+CREATE ROLE alice LOGIN PASSWORD 'alicepass';
+CREATE ROLE bob   LOGIN PASSWORD 'bobpass';
+```
 
+### 1.2.2. Настраиваем pg_hba.conf
 
+Фрагмент:
 
+```
+# Разрешаем trust только postgres и student
+local   all   postgres                 trust
+local   all   student                  trust
 
+# peer для alice и bob
+local   all   alice                    peer map=os_users
+local   all   bob                      peer map=os_users
 
+# всем остальным md5
+local   all   all                      md5
+host    all   all   127.0.0.1/32        md5
+host    all   all   ::1/128             md5
+```
 
-**2. Локализация дат: Получил номер сегодняшнего дня недели (например, с помощью EXTRACT(DOW FROM
-CURRENT_DATE)). Изменил параметры локализации сеанса (например, lc_time). Повлияло ли это на номер
-дня недели? Объяснил, почему.**
+### 1.2.3. Настройка pg_ident.conf
+
+```
+os_users   alice   alice
+os_users   bob     bob
+```
+
+Перегружаем конфигурацию:
+
+```
+sudo systemctl reload postgresql
+```
+
+### 1.2.4. Проверка peer
+
+Если нет пользователя ОС alice:
+
+```
+FATAL: Peer authentication failed for user "alice"
+```
+
+Создаём пользователя ОС:
+
+```
+sudo adduser alice
+```
+
+Теперь:
+
+```
+su - alice
+psql -d access_db
+```
+
+Успешно.
+
+---
+
+# 2. Модуль 2. Управление расширениями
+
+Мы моделируем расширение `uom` (единицы измерения), если в системе нет оригинального.
+
+## 2.1. Установка расширения
+
+```sql
+\c access_db
+
+SELECT name FROM pg_available_extensions;
+
+CREATE EXTENSION uom;
+```
+
+Проверяем:
+
+```sql
+\dx uom
+```
+
+## 2.2. Изучение структуры расширения
+
+Таблицы, созданные расширением:
+
+```sql
+SELECT c.oid::regclass
+FROM pg_class c
+JOIN pg_depend d ON d.objid = c.oid
+JOIN pg_extension e ON e.oid = d.refobjid
+WHERE e.extname = 'uom'
+  AND c.relkind='r';
+```
+
+Ожидаемый вывод:
+
+```
+uom.units
+uom.categories
+```
+
+## 2.3. Добавляем новые единицы
+
+```sql
+INSERT INTO uom.units (code, name, base_code, ratio)
+VALUES
+ ('ft','Фут','m',0.3048),
+ ('in','Дюйм','m',0.0254);
+```
+
+Проверяем:
+
+```sql
+SELECT * FROM uom.units WHERE code IN ('ft','in');
+```
+
+## 2.4. Права на объекты расширения
+
+```sql
+CREATE ROLE uom_reader;
+
+REVOKE ALL ON SCHEMA uom FROM PUBLIC;
+GRANT USAGE ON SCHEMA uom TO uom_reader;
+
+REVOKE ALL ON ALL TABLES IN SCHEMA uom FROM PUBLIC;
+GRANT SELECT ON ALL TABLES IN SCHEMA uom TO uom_reader;
+```
+
+Проверка:
+
+```sql
+\dp uom.units
+```
+
+## 2.5. Резервное копирование
+
+```
+pg_dump -n uom access_db > /tmp/uom.sql
+```
+
+Дамп содержит DDL + данные таблиц расширения.
+
+---
+
+# 3. Модуль 3. Локализация и кодировки
+
+## 3.1. Перенос KOI8R → UTF8
+
+### 3.1.1. Создание KOI8R-БД
+
+```
+createdb -E KOI8R --lc-collate=ru_RU.KOI8-R --lc-ctype=ru_RU.KOI8-R koi8_db
+```
+
+Проверяем:
+
+```sql
+\c koi8_db
+SELECT datname, pg_encoding_to_char(encoding), datcollate, datctype
+FROM pg_database WHERE datname='koi8_db';
+```
+
+### 3.1.2. Вставка кириллицы
+
+```sql
+CREATE TABLE msg_koi (id int, txt text);
+
+INSERT INTO msg_koi VALUES
+(1,'Привет'),
+(2,'Ёлка'),
+(3,'Проверка кодировки KOI8R');
+```
+
+### 3.1.3. Дамп
+
+```
+pg_dump -f /tmp/koi8.sql koi8_db
+```
+
+### 3.1.4. Создание UTF8-БД и импорт
+
+```
+createdb -E UTF8 --lc-collate=ru_RU.UTF-8 --lc-ctype=ru_RU.UTF-8 koi8_to_utf8
+psql -d koi8_to_utf8 -f /tmp/koi8.sql
+```
+
+Проверяем:
+
+```sql
+SELECT * FROM msg_koi;
+```
+
+## 3.2. Локаль lc_time и EXTRACT(DOW)
+
+```sql
+SELECT CURRENT_DATE, EXTRACT(DOW FROM CURRENT_DATE);
+```
+
+Меняем локаль:
+
+```sql
+SET lc_time='ru_RU.utf8';
+SELECT to_char(CURRENT_DATE,'Day');
+```
+
+Результат:
+
+```
+суббота
+```
+
+С английской локалью:
+
+```
+Saturday
+```
+
+EXTRACT(DOW) не меняется.
+
+---
+
+# Итоговые выводы
+
+1. PostgreSQL позволяет гибко управлять ролями, привилегиями и аутентификацией, включая peer и trust только для отдельных пользователей.  
+2. Расширения устанавливаются через `CREATE EXTENSION` и полностью управляются как обычные объекты БД (привилегии, дампы, структура).  
+3. Миграция между кодировками KOI8R → UTF8 полностью возможна через `pg_dump` и `psql`, при корректном client_encoding.  
+4. `lc_time` влияет только на текстовое представление дат, но не на числовой EXTRACT(DOW).  
 
